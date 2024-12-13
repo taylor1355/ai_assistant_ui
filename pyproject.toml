@@ -1,0 +1,15 @@
+[project]
+name = "ai_assistant_ui"
+version = "0.1.0"
+description = "AI-powered email assistant application"
+authors = [
+    {name = "Taylor Hearn", email = "hearntaylor@gmail.com"},
+]
+dependencies = []
+requires-python = ">=3.11"
+readme = "README.md"
+license = {text = "MIT"}
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
