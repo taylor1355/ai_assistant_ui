@@ -5,11 +5,26 @@ description = "AI-powered email assistant application"
 authors = [
     {name = "Taylor Hearn", email = "hearntaylor@gmail.com"},
 ]
-dependencies = []
+dynamic = ["dependencies"]
 requires-python = ">=3.11"
 readme = "README.md"
 license = {text = "MIT"}
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-requirements-txt"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ai_assistant_ui"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.metadata.hooks.requirements_txt]
+files = ["requirements.txt"]
+
+[tool.hatch.metadata.hooks.requirements_txt.dev]
+files = ["requirements-dev.txt"]
+
+[tool.hatch.build.hooks.custom]
+path = "pre_install.py"

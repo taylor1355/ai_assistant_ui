@@ -1,3 +1,6 @@
+# requirements.txt.template is committed instead of requirements.txt
+/requirements.txt
+
 .vscode/
 
 # Byte-compiled / optimized / DLL files

@@ -1,0 +1,2 @@
+textual>=1.0.0
+npc @ file:{NPC_PROJECT}/npc
