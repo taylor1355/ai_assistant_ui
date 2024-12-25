@@ -1,5 +1,6 @@
-# requirements.txt.template is committed instead of requirements.txt
-/requirements.txt
+# Project specific
+/logs/
+/requirements.txt 
 
 .vscode/
 
