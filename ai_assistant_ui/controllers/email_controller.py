@@ -73,9 +73,31 @@ class EmailController:
         # Create copies for history
         action_before = deepcopy(action)
         
-        # Apply modifications
-        if destination is not None:
+        # Handle destination change
+        if destination is not None and destination != action.destination:
+            # Remove action from current batch
+            current_batch = self.state.current_batch
+            current_batch.actions.remove(action)
+            
+            # Create new batch reference to trigger reactive update
+            updated_batch = ActionBatch(
+                id=current_batch.id,
+                actions=current_batch.actions.copy(),
+                status=current_batch.status
+            )
+            self.state.batches[current_batch.id] = updated_batch
+            if self.state.current_batch.id == current_batch.id:
+                self.state.current_batch = updated_batch
+            
+            # Get batch for new destination and add action
+            dest_batch = self.state.batches[destination.name.lower()]
             action.set_destination(destination)
+            dest_batch.actions.append(action)
+            
+            # Notify tabs to update
+            self._notify_batch_updated()
+            
+        # Apply other modifications
         if mark_as_read is not None:
             action.set_read_status(mark_as_read)
         if status is not None:

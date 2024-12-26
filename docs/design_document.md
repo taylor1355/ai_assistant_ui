@@ -45,6 +45,21 @@ Key Design Principles:
 2. Single Source of Truth: Centralized state management through batch operations
 3. Direct Updates: Minimal message passing between components
 4. Clear Responsibilities: Separate views for different interaction models
+5. Automatic Organization: Actions automatically move to appropriate destination tabs when their destination changes
+
+### 3.1.1 Destination Management
+The system maintains actions in batches organized by destination. When an action's destination changes:
+1. The action is automatically removed from its current batch
+2. The action is added to the batch corresponding to its new destination
+3. The action appears in the appropriate destination tab
+4. The state is updated through the controller to maintain consistency
+5. All views are notified of the change through the observer pattern
+
+This ensures that:
+- Actions are always displayed in the correct destination tab
+- State remains consistent between the model and views
+- Changes are properly tracked for undo/redo functionality
+- The user sees immediate visual feedback when changing destinations
 
 ### 3.2 Key Components
 
@@ -103,9 +118,20 @@ class EmailController:
         # Record history
         action_before = deepcopy(action)
         
-        # Apply modifications
+        # Handle destination changes
+        if 'destination' in modifications and modifications['destination'] != action.destination:
+            # Remove action from current batch
+            current_batch = self.state.current_batch
+            current_batch.actions.remove(action)
+            
+            # Get batch for new destination and add action
+            dest_batch = self.state.batches[modifications['destination'].name.lower()]
+            action.set_destination(modifications['destination'])
+            dest_batch.actions.append(action)
+        
+        # Apply other modifications
         for attr, value in modifications.items():
-            if hasattr(action, f"set_{attr}"):
+            if attr != 'destination' and hasattr(action, f"set_{attr}"):
                 getattr(action, f"set_{attr}")(value)
 
         # Record change and notify
@@ -126,29 +152,43 @@ class EmailTabs(Widget):
     def __init__(self, actions: list[InboxAction], controller: EmailController):
         self._destination_batches = batch_by_destination(actions)
         self._controller = controller
+        
+        # Initialize state batches
+        for dest, batch in self._destination_batches.items():
+            self._controller.state.batches[dest.name.lower()] = batch
 
     def compose(self):
         """Create tab per destination with email list view."""
         with TabbedContent():
             for dest in EmailDestination:
                 dest_batch = self._destination_batches.get(dest)
-                with TabPane(f"[b]{dest.name}[/b]"):
+                tab = TabPane(f"[b]{dest.name}[/b]")
+                tab.destination = dest # Associate tab with destination
+                with tab:
                     yield EmailListView(
                         email_batch=dest_batch,
                         controller=self._controller
                     )
 
-    def action_execute_batch(self) -> None:
-        """Execute the current batch of actions."""
-        current_tab = self.query_one("TabbedContent TabPane.-active")
-        if not current_tab:
-            return
+    def update_actions(self, actions: list[InboxAction]) -> None:
+        """Update tabs with new actions."""
+        # For each action, use controller to set its destination
+        for action in actions:
+            # Get current batch for action
+            current_batch = next(
+                (batch for batch in self._destination_batches.values() 
+                 if action in batch.actions),
+                None
+            )
             
-        list_view = current_tab.query_one("EmailListView")
-        if not list_view or not list_view.current_batch:
-            return
-
-        self.post_message(self.ExecuteBatch())
+            # If action's destination doesn't match its current batch, update it
+            if current_batch and action.destination != current_batch.actions[0].destination:
+                self._controller.modify_action(action, destination=action.destination)
+        
+        # Update view with new batches
+        self._destination_batches = batch_by_destination(actions)
+        for dest, batch in self._destination_batches.items():
+            self._controller.state.batches[dest.name.lower()] = batch
 ```
 
 ##### 3.2.2.2 Email List
@@ -304,13 +344,22 @@ class EmailController:
 ```mermaid
 graph TD
     A[GmailClient] -->|Emails| B[EmailController]
-    B -->|Creates| C[ActionBatch]
+    B -->|Creates| C[ActionBatches]
     C -->|Stored in| D[AppState]
     D -->|Current Batch| B
     B -->|Notifies| E[EmailListView]
     E -->|Displays| C
     E -->|Modifies via| B
     B -->|Updates| D
+    
+    subgraph Destination Change Flow
+        F[Action] -->|Current Batch| G[Source Tab]
+        F -->|modify_action| H[Controller]
+        H -->|Moves to| I[Destination Tab]
+        H -->|Updates| D
+        D -->|Notifies| G
+        D -->|Notifies| I
+    end
 ```
 
 ### 3.4 Key Algorithms

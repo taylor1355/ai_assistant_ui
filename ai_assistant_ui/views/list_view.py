@@ -1,10 +1,12 @@
 """List view for displaying batches of emails."""
 import logging
-from textual.widgets import DataTable
+from textual.widgets import DataTable, Select
 from textual.widget import Widget
 from textual.reactive import reactive
+from textual.geometry import Offset
 
 from ai_assistant_ui.models.action import InboxAction, ActionStatus
+from npc.prompts.ai_assistant.email_action_template import EmailDestination
 from ai_assistant_ui.models.batch import ActionBatch
 from ai_assistant_ui.controllers.email_controller import EmailController
 from ai_assistant_ui.views.card_view import EmailCardView
@@ -32,6 +34,14 @@ class EmailListView(Widget):
     EmailListView > DataTable {
         height: 1fr;
         margin: 0 1;
+    }
+
+    EmailListView Select {
+        width: 30;
+        height: auto;
+        border: solid $primary;
+        background: $surface;
+        margin: 1;
     }
     """
 
@@ -64,6 +74,7 @@ class EmailListView(Widget):
 
     def on_mount(self) -> None:
         """Set up the table when the widget is mounted."""
+        self._table.focus()
         self._table.add_columns(
             "Status",
             "Subject",
@@ -135,3 +146,47 @@ class EmailListView(Widget):
             return
             
         self._controller.modify_action(action, mark_as_read=not action.mark_as_read)
+
+    def action_cursor_down(self) -> None:
+        """Move cursor down one row."""
+        if not self.current_batch:
+            return
+        if self._table.cursor_row is None:
+            self._table.move_cursor(row=0)
+        else:
+            next_row = min(self._table.cursor_row + 1, len(self.current_batch.actions) - 1)
+            self._table.move_cursor(row=next_row)
+
+    def action_cursor_up(self) -> None:
+        """Move cursor up one row."""
+        if not self.current_batch:
+            return
+        if self._table.cursor_row is None:
+            self._table.move_cursor(row=0)
+        else:
+            prev_row = max(self._table.cursor_row - 1, 0)
+            self._table.move_cursor(row=prev_row)
+
+    def action_edit_destination(self) -> None:
+        """Show destination selection menu."""
+        action = self._get_selected_action()
+        if not action or not action.can_modify:
+            return
+
+        # Create and show destination select popup
+        select = Select(
+            [(dest.name, dest) for dest in EmailDestination],
+            value=action.destination,
+            id="destination-select"
+        )
+        self.mount(select)
+        select.focus()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """Handle selection changes in the destination select."""
+        action = self._get_selected_action()
+        if action and event.value and event.value != action.destination:
+            self._controller.modify_action(action, destination=event.value)
+        
+            event.select.remove()
+            self._table.focus()

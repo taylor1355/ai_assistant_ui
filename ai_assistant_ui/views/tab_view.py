@@ -36,6 +36,10 @@ class EmailTabs(Widget):
         super().__init__()
         self._destination_batches = batch_by_destination(actions)
         self._controller = controller
+        
+        # Initialize state batches
+        for dest, batch in self._destination_batches.items():
+            self._controller.state.batches[dest.name.lower()] = batch
 
     def compose(self):
         with TabbedContent():
@@ -63,24 +67,34 @@ class EmailTabs(Widget):
 
     def update_actions(self, actions: list[InboxAction]) -> None:
         """Update tabs with new actions."""
-        # Compute destination batches
-        self._destination_batches = batch_by_destination(actions)
-        logger.info(f"Grouped {len(actions)} actions into {len(self._destination_batches)} destination batches")
-        for dest, batch in self._destination_batches.items():
-            logger.debug(f"  {dest.name}: {len(batch.actions)} actions")
+        # For each action, use controller to set its destination
+        for action in actions:
+            # Get current batch for action
+            current_batch = next(
+                (batch for batch in self._destination_batches.values() 
+                 if action in batch.actions),
+                None
+            )
+            
+            # If action's destination doesn't match its current batch, update it
+            if current_batch and action.destination != current_batch.actions[0].destination:
+                self._controller.modify_action(action, destination=action.destination)
         
+        # Update view with new batches
+        self._destination_batches = batch_by_destination(actions)
+        for dest, batch in self._destination_batches.items():
+            self._controller.state.batches[dest.name.lower()] = batch
+            
         # Update each tab's content
         for dest in EmailDestination:
-            # Find tab for this destination
             tab = next(t for t in self.query("TabPane") if t.destination == dest)
             list_view = tab.query_one(EmailListView)
             if list_view:
                 batch = self._destination_batches.get(dest)
-                # Update the view's batch through the reactive property
                 list_view.current_batch = batch
         
-        # Set initial batch for first tab
-        if actions and self._destination_batches:
+        # Set initial batch if needed
+        if not self._controller.state.current_batch and self._destination_batches:
             first_dest = next(iter(self._destination_batches))
             self._controller.select_batch(self._destination_batches[first_dest])
 
