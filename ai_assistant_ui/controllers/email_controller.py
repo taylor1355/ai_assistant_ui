@@ -27,12 +27,15 @@ def _convert_npc_status_to_action_status(status: NpcStatus) -> ActionStatus:
 class EmailController:
     """Unified controller for email operations."""
 
+    # Callback type definitions
+    BatchUpdateCallback = Callable[[ActionBatch], None]
+
     def __init__(self, gmail: GmailWrapper, state: AppState):
         """Initialize the controller."""
         self.gmail = gmail
         self.state = state
         self._error_message: Optional[str] = None
-        self._batch_updated_callbacks: list[Callable[[ActionBatch], None]] = []
+        self._batch_callbacks: list[EmailController.BatchUpdateCallback] = []
         logger.info("EmailController initialized")
 
     @property
@@ -40,78 +43,122 @@ class EmailController:
         """Get the current error message."""
         return self._error_message
 
-    def add_batch_updated_callback(self, callback: Callable[[ActionBatch], None]) -> None:
-        """Add a callback for batch updates."""
-        if callback not in self._batch_updated_callbacks:
-            self._batch_updated_callbacks.append(callback)
-            logger.debug("Added batch update callback")
+    def add_batch_updated_callback(self, callback: BatchUpdateCallback) -> None:
+        """Register a callback for batch updates.
+        
+        The callback will be invoked whenever a batch's state changes,
+        with the updated batch as the argument.
+        """
+        if callback not in self._batch_callbacks:
+            self._batch_callbacks.append(callback)
+            logger.debug(f"Registered batch update callback (total: {len(self._batch_callbacks)})")
 
-    def remove_batch_updated_callback(self, callback: Callable[[ActionBatch], None]) -> None:
-        """Remove a callback for batch updates."""
-        if callback in self._batch_updated_callbacks:
-            self._batch_updated_callbacks.remove(callback)
-            logger.debug("Removed batch update callback")
+    def remove_batch_updated_callback(self, callback: BatchUpdateCallback) -> None:
+        """Unregister a batch update callback."""
+        if callback in self._batch_callbacks:
+            self._batch_callbacks.remove(callback)
+            logger.debug(f"Unregistered batch update callback (remaining: {len(self._batch_callbacks)})")
+        else:
+            logger.warning("Attempted to remove non-existent callback")
 
     def _notify_batch_updated(self) -> None:
-        """Notify listeners of batch updates."""
-        if self.state.current_batch:
-            logger.debug(f"Notifying {len(self._batch_updated_callbacks)} listeners of batch update for {self.state.current_batch.id}")
-            for callback in self._batch_updated_callbacks:
-                callback(self.state.current_batch)
+        """Notify registered callbacks of batch updates."""
+        if not self.state.current_batch:
+            return
+            
+        batch = self.state.current_batch
+        logger.debug(f"Notifying {len(self._batch_callbacks)} callbacks of update to batch {batch.id}")
+        
+        for callback in self._batch_callbacks:
+            try:
+                callback(batch)
+            except Exception as e:
+                logger.error(f"Error in batch update callback: {e}", exc_info=True)
 
     # Action Operations
+
+    def _update_batch_reference(self, batch: ActionBatch) -> ActionBatch:
+        """Create new batch reference to trigger reactive update."""
+        updated_batch = ActionBatch(
+            id=batch.id,
+            actions=batch.actions.copy(),
+            status=batch.status
+        )
+        self.state.batches[batch.id] = updated_batch
+        if self.state.current_batch and self.state.current_batch.id == batch.id:
+            self.state.current_batch = updated_batch
+        return updated_batch
+
+    def _change_action_destination(self, 
+                                 action: InboxAction, 
+                                 destination: EmailDestination) -> None:
+        """Move action to a new destination batch."""
+        if not self.state.current_batch:
+            logger.error("No current batch while changing action destination")
+            return
+            
+        # Remove from current batch
+        current_batch = self.state.current_batch
+        current_batch.actions.remove(action)
+        self._update_batch_reference(current_batch)
+        
+        # Add to destination batch
+        dest_batch = self.state.batches[destination.name.lower()]
+        action.set_destination(destination)
+        dest_batch.actions.append(action)
+        
+        # Notify of updates
+        self._notify_batch_updated()
+
+    def _update_action_state(self, action: InboxAction, 
+                           destination: Optional[EmailDestination] = None,
+                           mark_as_read: Optional[bool] = None,
+                           status: Optional[ActionStatus] = None) -> None:
+        """Update an action's state."""
+        if destination is not None and destination != action.destination:
+            self._change_action_destination(action, destination)
+        if mark_as_read is not None:
+            action.set_read_status(mark_as_read)
+        if status is not None:
+            status_updates = {
+                ActionStatus.ACCEPTED: action.accept,
+                ActionStatus.REJECTED: action.reject,
+            }
+            if update_func := status_updates.get(status):
+                update_func()
 
     def modify_action(self, action: InboxAction, 
                      destination: Optional[EmailDestination] = None,
                      mark_as_read: Optional[bool] = None,
                      status: Optional[ActionStatus] = None) -> None:
         """Modify an action's properties."""
+        # Validate modification
         if not action.can_modify or not self.state.current_batch:
+            logger.warning(
+                f"Cannot modify action {action.email.id}: "
+                f"can_modify={action.can_modify}, "
+                f"has_current_batch={bool(self.state.current_batch)}"
+            )
             self._error_message = "Cannot modify action in current state"
             return
 
-        # Create copies for history
-        action_before = deepcopy(action)
-        
-        # Handle destination change
-        if destination is not None and destination != action.destination:
-            # Remove action from current batch
-            current_batch = self.state.current_batch
-            current_batch.actions.remove(action)
+        try:
+            # Record state for history
+            action_before = deepcopy(action)
             
-            # Create new batch reference to trigger reactive update
-            updated_batch = ActionBatch(
-                id=current_batch.id,
-                actions=current_batch.actions.copy(),
-                status=current_batch.status
+            # Apply changes
+            self._update_action_state(action, destination, mark_as_read, status)
+            
+            # Record in history
+            self.state.record_action_change(
+                action_before,
+                deepcopy(action),
+                self.state.current_batch.id
             )
-            self.state.batches[current_batch.id] = updated_batch
-            if self.state.current_batch.id == current_batch.id:
-                self.state.current_batch = updated_batch
             
-            # Get batch for new destination and add action
-            dest_batch = self.state.batches[destination.name.lower()]
-            action.set_destination(destination)
-            dest_batch.actions.append(action)
-            
-            # Notify tabs to update
-            self._notify_batch_updated()
-            
-        # Apply other modifications
-        if mark_as_read is not None:
-            action.set_read_status(mark_as_read)
-        if status is not None:
-            if status == ActionStatus.ACCEPTED:
-                action.accept()
-            elif status == ActionStatus.REJECTED:
-                action.reject()
-
-        # Record change in history
-        self.state.record_action_change(
-            action_before,
-            deepcopy(action),
-            self.state.current_batch.id
-        )
+        except Exception as e:
+            logger.exception(f"Failed to modify action {action.email.id}")
+            self._error_message = f"Failed to modify action: {str(e)}"
 
     async def execute_action(self, action: InboxAction) -> bool:
         """Execute a single action."""
@@ -138,94 +185,81 @@ class EmailController:
 
     # Batch Operations
 
-    async def load_batch(self, email_threads: List[Tuple[Email, GmailThread]]) -> Optional[ActionBatch]:
-        """Create a new batch from the provided email threads."""
+    async def create_batch(self, email_threads: List[Tuple[Email, GmailThread]]) -> Optional[ActionBatch]:
+        """Create a new batch from email threads."""
+        if not email_threads:
+            logger.warning("No email threads provided")
+            return None
+
         try:
-            if not email_threads:
-                logger.warning("No email threads provided to load_batch")
-                return None
-
-            logger.info(f"Creating batch from {len(email_threads)} email threads")
-            
-            # Create actions for each email
-            actions = []
-            for i, (email, thread) in enumerate(email_threads, 1):
-                try:
-                    logger.debug(f"Processing email {i}/{len(email_threads)}: {email.subject}")
-                    # Create action with suggested destination
-                    npc_action = await self.gmail.suggest_action(email, thread)
-                    action = InboxAction(
-                        email=email,
-                        destination=npc_action.destination,
-                        mark_as_read=npc_action.mark_as_read
-                    )
-                    action.status = _convert_npc_status_to_action_status(npc_action.status)
-                    actions.append(action)
-                    logger.debug(f"Created action with destination: {action.destination}")
-                except Exception as e:
-                    logger.error(f"Error creating action for email {email.subject}: {str(e)}", exc_info=True)
-                    raise
-
-            logger.info(f"Successfully created {len(actions)} actions")
-
-            # Create new batch
-            batch = ActionBatch(
-                id=f"batch_{len(self.state.batches) + 1}",
-                actions=actions,
-                status=ActionBatchStatus.READY
+            batch = await ActionBatch.from_email_threads(
+                threads=email_threads,
+                action_suggestion_fn=self.gmail.suggest_action,
+                batch_id=f"batch_{len(self.state.batches) + 1}"
             )
-            logger.info(f"Created new batch {batch.id}")
-
-            # Update state
+            
             self.state.set_current_batch(batch)
             self._notify_batch_updated()
+            logger.info(f"Created batch {batch.id} with {len(batch.actions)} actions")
             
             return batch
 
         except Exception as e:
-            error_msg = f"Failed to load batch: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            self._error_message = error_msg
+            logger.exception("Failed to create batch")
+            self._error_message = f"Failed to create batch: {str(e)}"
             return None
 
+    def _update_batch_status(self, batch: ActionBatch, status: ActionBatchStatus, message: str) -> None:
+        """Update batch status and notify listeners."""
+        batch.set_status(status)
+        if status == ActionBatchStatus.FAILED:
+            logger.error(f"Batch {batch.id}: {message}")
+            self._error_message = message
+        else:
+            logger.info(f"Batch {batch.id}: {message}")
+        self._notify_batch_updated()
+
     async def execute_batch(self, batch: ActionBatch) -> bool:
-        """Execute all accepted actions in a batch."""
+        """Execute all executable actions in a batch."""
         if not batch.can_execute:
-            error_msg = "Batch cannot be executed in current state"
-            logger.warning(f"{error_msg} (batch {batch.id})")
-            self._error_message = error_msg
+            self._update_batch_status(
+                batch, 
+                ActionBatchStatus.FAILED,
+                "Batch cannot be executed in current state"
+            )
             return False
 
-        logger.info(f"Starting execution of batch {batch.id}")
-        batch.set_status(ActionBatchStatus.EXECUTING)
-        success = True
+        # Start execution
+        self._update_batch_status(
+            batch,
+            ActionBatchStatus.EXECUTING,
+            "Starting batch execution"
+        )
 
         try:
-            # Execute each accepted action
+            # Execute each action
+            failed = 0
             for action in batch.actions:
                 if action.can_execute:
                     logger.debug(f"Executing action for email: {action.email.subject}")
                     if not await self.execute_action(action):
-                        logger.error(f"Failed to execute action for email: {action.email.subject}")
-                        success = False
+                        failed += 1
 
-            # Update batch status based on results
-            if not success:
-                logger.warning(f"Batch {batch.id} execution failed")
-                batch.set_status(ActionBatchStatus.FAILED)
-            else:
-                logger.info(f"Batch {batch.id} execution completed successfully")
-                batch.set_status(ActionBatchStatus.COMPLETED)
-
-            self._notify_batch_updated()
+            # Update final status
+            success = failed == 0
+            self._update_batch_status(
+                batch,
+                ActionBatchStatus.COMPLETED if success else ActionBatchStatus.FAILED,
+                f"Execution complete: {failed} actions failed" if failed else "Execution successful"
+            )
             return success
 
         except Exception as e:
-            error_msg = f"Batch execution failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            batch.set_status(ActionBatchStatus.FAILED)
-            self._error_message = error_msg
-            self._notify_batch_updated()
+            self._update_batch_status(
+                batch,
+                ActionBatchStatus.FAILED,
+                f"Batch execution failed: {str(e)}"
+            )
             return False
 
     async def execute_current_batch(self) -> bool:
@@ -234,72 +268,46 @@ class EmailController:
             logger.warning("No current batch to execute")
             self._error_message = "No current batch to execute"
             return False
+            
         return await self.execute_batch(self.state.current_batch)
 
     # History Operations
-
     def undo(self) -> bool:
         """Undo the last action modification."""
         if not self.state.can_undo():
+            logger.debug("No actions to undo")
             return False
 
-        entry = self.state.undo()
-        if not entry:
-            return False
-
-        # Find the action in the current state
-        batch = self.state.get_batch_by_id(entry.batch_id)
-        if not batch:
-            return False
-
-        action = next(
-            (a for a in batch.actions 
-             if a.email.id == entry.action_before.email.id),
-            None
-        )
-        if not action:
-            return False
-
-        # Restore the previous state
-        action.destination = entry.action_before.destination
-        action.mark_as_read = entry.action_before.mark_as_read
-        action.status = entry.action_before.status
-        return True
+        success = self.state.undo()
+        if success:
+            logger.info("Undid last action")
+            self._notify_batch_updated()
+        return success
 
     def redo(self) -> bool:
         """Redo the last undone action modification."""
         if not self.state.can_redo():
+            logger.debug("No actions to redo")
             return False
 
-        entry = self.state.redo()
-        if not entry:
-            return False
-
-        # Find the action in the current state
-        batch = self.state.get_batch_by_id(entry.batch_id)
-        if not batch:
-            return False
-
-        action = next(
-            (a for a in batch.actions 
-             if a.email.id == entry.action_after.email.id),
-            None
-        )
-        if not action:
-            return False
-
-        # Restore the redone state
-        action.destination = entry.action_after.destination
-        action.mark_as_read = entry.action_after.mark_as_read
-        action.status = entry.action_after.status
-        return True
+        success = self.state.redo()
+        if success:
+            logger.info("Redid last action")
+            self._notify_batch_updated()
+        return success
 
     # Batch State Operations
 
-    def get_batch_summary(self) -> dict:
+    # Batch state operations
+    def select_batch(self, batch: ActionBatch) -> None:
+        """Select a batch as the current batch and notify listeners."""
+        logger.info(f"Selecting batch {batch.id} with {len(batch.actions)} actions")
+        self.state.set_current_batch(batch)
+        self._notify_batch_updated()
+
+    def get_current_batch_summary(self) -> dict[str, Optional[int | ActionBatchStatus]]:
         """Get a summary of the current batch state."""
-        batch = self.state.current_batch
-        if not batch:
+        if not self.state.current_batch:
             return {
                 'status': None,
                 'total': 0,
@@ -311,6 +319,7 @@ class EmailController:
                 'modified': 0
             }
 
+        batch = self.state.current_batch
         summary = {
             'status': batch.status,
             'total': batch.size,
@@ -321,19 +330,5 @@ class EmailController:
             'failed': batch.count_actions(ActionStatus.FAILED),
             'modified': sum(1 for action in batch.actions if action.is_modified)
         }
-        logger.debug(f"Batch summary for {batch.id}: {summary}")
+        logger.debug(f"Batch {batch.id} summary: {summary}")
         return summary
-
-    def get_batches_by_status(self, status: ActionBatchStatus) -> list[ActionBatch]:
-        """Get all batches with the given status."""
-        return self.state.get_batches_by_status(status)
-
-    def get_batch_by_id(self, batch_id: str) -> Optional[ActionBatch]:
-        """Get a batch by its ID."""
-        return self.state.get_batch_by_id(batch_id)
-
-    def select_batch(self, batch: ActionBatch) -> None:
-        """Select a batch as the current batch."""
-        logger.info(f"Selecting batch {batch.id}")
-        self.state.set_current_batch(batch)
-        self._notify_batch_updated()

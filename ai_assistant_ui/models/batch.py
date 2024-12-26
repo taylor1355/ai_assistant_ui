@@ -2,9 +2,10 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from ai_assistant_ui.models.action import InboxAction, ActionStatus
+from npc.apis.gmail_client import Email, GmailThread
 from npc.prompts.ai_assistant.email_action_template import EmailDestination
 
 
@@ -52,8 +53,31 @@ class ActionBatch:
         )
 
 
-def batch_by_destination(actions: list[InboxAction]) -> dict[EmailDestination, ActionBatch]:
-    """Organize a list of InboxActions into batches based on suggested destination."""
+    @classmethod
+    async def from_email_threads(cls, 
+                               threads: list[tuple[Email, GmailThread]], 
+                               action_suggestion_fn: Callable[[Email, GmailThread], Awaitable[InboxAction]],
+                               batch_id: str) -> 'ActionBatch':
+        """Create a new batch from email threads using a suggestion function."""
+        actions = []
+        for email, thread in threads:
+            suggestion = await action_suggestion_fn(email, thread)
+            action = InboxAction(
+                email=email,
+                destination=suggestion.destination,
+                mark_as_read=suggestion.mark_as_read
+            )
+            action.status = suggestion.status
+            actions.append(action)
+            
+        return cls(
+            id=batch_id,
+            actions=actions,
+            status=ActionBatchStatus.READY
+        )
+
+def group_by_destination(actions: list[InboxAction]) -> dict[EmailDestination, ActionBatch]:
+    """Group actions into batches based on their destination."""
     batches = {dest: [] for dest in EmailDestination}
     for action in actions:
         batches[action.destination].append(action)

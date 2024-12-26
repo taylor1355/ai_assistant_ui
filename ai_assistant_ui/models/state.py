@@ -54,23 +54,60 @@ class AppState:
         """Check if there are actions that can be redone."""
         return len(self.redo_stack) > 0
 
-    def undo(self) -> Optional[ActionHistoryEntry]:
-        """Undo the last action change."""
-        if not self.can_undo():
+    def _find_action(self, batch_id: str, email_id: str) -> Optional[InboxAction]:
+        """Find an action by its batch and email IDs."""
+        batch = self.batches.get(batch_id)
+        if not batch:
             return None
+            
+        for action in batch.actions:
+            if action.email.id == email_id:
+                return action
+        return None
+
+    def _restore_action_state(self, action: InboxAction, source: InboxAction) -> None:
+        """Restore an action's state from a source action."""
+        action.destination = source.destination
+        action.mark_as_read = source.mark_as_read
+        action.status = source.status
+
+    def undo(self) -> bool:
+        """Undo the last action change.
+        
+        Returns:
+            bool: True if the action was successfully undone, False otherwise.
+        """
+        if not self.can_undo():
+            return False
         
         entry = self.history.pop()
         self.redo_stack.append(entry)
-        return entry
+        
+        action = self._find_action(entry.batch_id, entry.action_before.email.id)
+        if not action:
+            return False
+            
+        self._restore_action_state(action, entry.action_before)
+        return True
 
-    def redo(self) -> Optional[ActionHistoryEntry]:
-        """Redo the last undone action change."""
+    def redo(self) -> bool:
+        """Redo the last undone action change.
+        
+        Returns:
+            bool: True if the action was successfully redone, False otherwise.
+        """
         if not self.can_redo():
-            return None
+            return False
         
         entry = self.redo_stack.pop()
         self.history.append(entry)
-        return entry
+        
+        action = self._find_action(entry.batch_id, entry.action_after.email.id)
+        if not action:
+            return False
+            
+        self._restore_action_state(action, entry.action_after)
+        return True
 
     def get_batch_by_id(self, batch_id: str) -> Optional[ActionBatch]:
         """Get a batch by its ID."""

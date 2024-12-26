@@ -106,7 +106,7 @@ class InboxApp(App):
                 return None, InboxApp.ErrorMessages.NO_UNREAD_EMAILS
             
             # Create batch from threads
-            batch = await self.email_controller.load_batch(email_threads)
+            batch = await self.email_controller.create_batch(email_threads)
             if not batch:
                 return None, InboxApp.ErrorMessages.BATCH_CREATE_ERROR.format(
                     self.email_controller.error_message

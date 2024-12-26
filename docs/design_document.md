@@ -41,11 +41,15 @@ The system will be built using the Textual framework and will follow a Model-Vie
 ```
 
 Key Design Principles:
-1. Efficient Workflow: Quick keyboard-driven action editing
-2. Single Source of Truth: Centralized state management through batch operations
-3. Direct Updates: Minimal message passing between components
-4. Clear Responsibilities: Separate views for different interaction models
-5. Automatic Organization: Actions automatically move to appropriate destination tabs when their destination changes
+1. Single Responsibility: Each component has a clear, focused purpose
+   - State manages data, history, and action restoration
+   - Controller coordinates high-level operations
+   - Models encapsulate business logic
+   - Views handle user interaction and display
+2. Efficient Workflow: Quick keyboard-driven action editing
+3. Single Source of Truth: State manages all data mutations and history
+4. Direct Updates: Minimal message passing between components
+5. Error Handling: Consistent error reporting and recovery at each layer
 
 ### 3.1.1 Destination Management
 The system maintains actions in batches organized by destination. When an action's destination changes:
@@ -78,7 +82,6 @@ class AppState:
         """Set the current batch being processed."""
         self.current_batch = batch
         self.batches[batch.id] = batch
-        # Clear redo stack when starting new batch
         self.redo_stack.clear()
 
     def record_action_change(self, before: InboxAction, after: InboxAction, batch_id: str) -> None:
@@ -91,56 +94,110 @@ class AppState:
         self.history.append(entry)
         self.redo_stack.clear()
 
+    def _find_action(self, batch_id: str, email_id: str) -> Optional[InboxAction]:
+        """Find an action by its batch and email IDs."""
+        batch = self.batches.get(batch_id)
+        if not batch:
+            return None
+            
+        for action in batch.actions:
+            if action.email.id == email_id:
+                return action
+        return None
+
+    def _restore_action_state(self, action: InboxAction, source: InboxAction) -> None:
+        """Restore an action's state from a source action."""
+        action.destination = source.destination
+        action.mark_as_read = source.mark_as_read
+        action.status = source.status
+
+    def undo(self) -> bool:
+        """Undo the last action change."""
+        if not self.can_undo():
+            return False
+        
+        entry = self.history.pop()
+        self.redo_stack.append(entry)
+        
+        action = self._find_action(entry.batch_id, entry.action_before.email.id)
+        if not action:
+            return False
+            
+        self._restore_action_state(action, entry.action_before)
+        return True
+
+    def redo(self) -> bool:
+        """Redo the last undone action change."""
+        if not self.can_redo():
+            return False
+        
+        entry = self.redo_stack.pop()
+        self.history.append(entry)
+        
+        action = self._find_action(entry.batch_id, entry.action_after.email.id)
+        if not action:
+            return False
+            
+        self._restore_action_state(action, entry.action_after)
+        return True
+
 # Controller Update Management
 class EmailController:
     """Unified controller for email operations."""
     def __init__(self, gmail: GmailWrapper, state: AppState):
         self.gmail = gmail
         self.state = state
-        self._batch_updated_callbacks: list[Callable[[ActionBatch], None]] = []
+        self._batch_callbacks: list[BatchUpdateCallback] = []
 
-    def add_batch_updated_callback(self, callback: Callable[[ActionBatch], None]) -> None:
-        """Add a callback for batch updates."""
-        if callback not in self._batch_updated_callbacks:
-            self._batch_updated_callbacks.append(callback)
+    def add_batch_updated_callback(self, callback: BatchUpdateCallback) -> None:
+        """Register a callback for batch updates."""
+        if callback not in self._batch_callbacks:
+            self._batch_callbacks.append(callback)
+            logger.debug(f"Registered batch update callback (total: {len(self._batch_callbacks)})")
 
     def _notify_batch_updated(self) -> None:
-        """Notify listeners of batch updates."""
-        if self.state.current_batch:
-            for callback in self._batch_updated_callbacks:
-                callback(self.state.current_batch)
+        """Notify registered callbacks of batch updates."""
+        if not self.state.current_batch:
+            return
+            
+        batch = self.state.current_batch
+        for callback in self._batch_callbacks:
+            try:
+                callback(batch)
+            except Exception as e:
+                logger.error(f"Error in batch update callback: {e}", exc_info=True)
 
-    def modify_action(self, action: InboxAction, **modifications) -> None:
-        """Modify an action and notify listeners."""
-        if not action.can_modify:
+    def modify_action(self, action: InboxAction, 
+                     destination: Optional[EmailDestination] = None,
+                     mark_as_read: Optional[bool] = None,
+                     status: Optional[ActionStatus] = None) -> None:
+        """Modify an action's properties."""
+        if not action.can_modify or not self.state.current_batch:
+            logger.warning("Cannot modify action in current state")
             return
 
-        # Record history
+        # Record state for history
         action_before = deepcopy(action)
         
-        # Handle destination changes
-        if 'destination' in modifications and modifications['destination'] != action.destination:
-            # Remove action from current batch
-            current_batch = self.state.current_batch
-            current_batch.actions.remove(action)
-            
-            # Get batch for new destination and add action
-            dest_batch = self.state.batches[modifications['destination'].name.lower()]
-            action.set_destination(modifications['destination'])
-            dest_batch.actions.append(action)
-        
-        # Apply other modifications
-        for attr, value in modifications.items():
-            if attr != 'destination' and hasattr(action, f"set_{attr}"):
-                getattr(action, f"set_{attr}")(value)
+        # Apply changes
+        if destination is not None and destination != action.destination:
+            self._change_action_destination(action, destination)
+        if mark_as_read is not None:
+            action.set_read_status(mark_as_read)
+        if status is not None:
+            status_updates = {
+                ActionStatus.ACCEPTED: action.accept,
+                ActionStatus.REJECTED: action.reject,
+            }
+            if update_func := status_updates.get(status):
+                update_func()
 
-        # Record change and notify
+        # Record in history
         self.state.record_action_change(
             action_before,
             deepcopy(action),
             self.state.current_batch.id
         )
-        self._notify_batch_updated()
 ```
 
 #### 3.2.2 View Components
@@ -150,7 +207,7 @@ class EmailController:
 class EmailTabs(Widget):
     """Tab container for different email destinations."""
     def __init__(self, actions: list[InboxAction], controller: EmailController):
-        self._destination_batches = batch_by_destination(actions)
+        self._destination_batches = group_by_destination(actions)
         self._controller = controller
         
         # Initialize state batches
@@ -186,7 +243,7 @@ class EmailTabs(Widget):
                 self._controller.modify_action(action, destination=action.destination)
         
         # Update view with new batches
-        self._destination_batches = batch_by_destination(actions)
+        self._destination_batches = group_by_destination(actions)
         for dest, batch in self._destination_batches.items():
             self._controller.state.batches[dest.name.lower()] = batch
 ```
@@ -346,19 +403,22 @@ graph TD
     A[GmailClient] -->|Emails| B[EmailController]
     B -->|Creates| C[ActionBatches]
     C -->|Stored in| D[AppState]
-    D -->|Current Batch| B
-    B -->|Notifies| E[EmailListView]
-    E -->|Displays| C
-    E -->|Modifies via| B
-    B -->|Updates| D
     
-    subgraph Destination Change Flow
-        F[Action] -->|Current Batch| G[Source Tab]
-        F -->|modify_action| H[Controller]
-        H -->|Moves to| I[Destination Tab]
-        H -->|Updates| D
-        D -->|Notifies| G
-        D -->|Notifies| I
+    subgraph State Management
+        D -->|Manages| E[History]
+        D -->|Manages| F[Action State]
+        D -->|Manages| G[Batch State]
+    end
+    
+    subgraph Controller Flow
+        B -->|Coordinates| H[Operations]
+        H -->|Updates via| D
+        H -->|Notifies| I[Views]
+    end
+    
+    subgraph View Updates
+        I -->|Displays| G
+        I -->|User Actions| H
     end
 ```
 
@@ -419,24 +479,75 @@ Esc           - Close card view
 - Error message display
 
 ### 4.3 Error Handling
-- Centralized error handling
-- Clear error messages
-- Automatic retry for transient failures
-- State rollback on error
-- Detailed logging
+Each layer handles errors according to its responsibility:
+
+#### State Layer
+- Validates state transitions
+- Ensures data consistency during undo/redo
+- Maintains history integrity
+- Provides rollback capabilities
+
+#### Controller Layer
+- Coordinates error recovery
+- Logs errors with context
+- Updates error messages for UI
+- Manages callback error isolation
+
+#### View Layer
+- Displays error messages
+- Provides user feedback
+- Maintains UI consistency
+- Handles input validation
+
+Common Features:
+- Detailed logging at each layer
+- Clear error messages for users
+- Graceful degradation
+- State consistency preservation
 
 ## 5. Testing Plan
 
 ### 5.1 Unit Tests
-- State management logic
-- Controller operations
-- View rendering
-- Error handling
+
+#### State Layer Tests
+- History management (undo/redo operations)
+- Action state transitions
+- Batch state management
+- Data consistency validation
+- Error recovery mechanisms
+
+#### Controller Layer Tests
+- Operation coordination
+- Callback management
+- Error propagation
+- State update notifications
+- Gmail API interaction
+
+#### View Layer Tests
+- UI component rendering
+- User input handling
+- Error message display
+- State change reactions
+- Keyboard navigation
 
 ### 5.2 Integration Tests
+
+#### Component Integration
+- State-Controller interaction
+- Controller-View communication
+- View-State synchronization
+- Error handling across layers
+
+#### Workflow Testing
+- Email processing pipelines
+- Batch operations
+- User interaction flows
+- Error recovery scenarios
+
+#### System Tests
 - End-to-end workflows
-- State synchronization
-- Error recovery
+- Error handling chains
+- State consistency
 
 
 ## 6. Rollout Plan

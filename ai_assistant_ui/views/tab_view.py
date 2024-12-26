@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 from ai_assistant_ui.controllers.email_controller import EmailController
 from ai_assistant_ui.models.action import InboxAction
-from ai_assistant_ui.models.batch import ActionBatchStatus, batch_by_destination
+from ai_assistant_ui.models.batch import ActionBatchStatus, group_by_destination
 from ai_assistant_ui.views.list_view import EmailListView
 from npc.prompts.ai_assistant.email_action_template import EmailDestination
 
@@ -34,7 +34,7 @@ class EmailTabs(Widget):
         controller: EmailController
     ):
         super().__init__()
-        self._destination_batches = batch_by_destination(actions)
+        self._destination_batches = group_by_destination(actions)
         self._controller = controller
         
         # Initialize state batches
@@ -81,7 +81,7 @@ class EmailTabs(Widget):
                 self._controller.modify_action(action, destination=action.destination)
         
         # Update view with new batches
-        self._destination_batches = batch_by_destination(actions)
+        self._destination_batches = group_by_destination(actions)
         for dest, batch in self._destination_batches.items():
             self._controller.state.batches[dest.name.lower()] = batch
             
