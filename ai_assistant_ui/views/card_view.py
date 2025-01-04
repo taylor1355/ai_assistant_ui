@@ -1,12 +1,12 @@
-"""Detailed single email card view."""
+"""Email detail view showing full content."""
 from textual.screen import ModalScreen
-from textual.widgets import Static, Label, Select
+from textual.widgets import Static, Label
 from textual.containers import Vertical, Horizontal
 from textual.reactive import reactive
 
 from ai_assistant_ui.models.action import InboxAction, ActionStatus
 from ai_assistant_ui.controllers.email_controller import EmailController
-from npc.prompts.ai_assistant.email_action_template import EmailDestination
+from ai_assistant_ui.views.shortcut_bar import ShortcutBar
 
 
 class EmailCardView(ModalScreen):
@@ -20,10 +20,12 @@ class EmailCardView(ModalScreen):
     EmailCardView > Vertical {
         background: $surface;
         border: thick $primary;
-        min-width: 60;
-        max-width: 100;
-        max-height: 40;
+        min-width: 80;
+        max-width: 120;
+        height: 40;
         padding: 1 2;
+        layout: grid;
+        grid-rows: auto 1fr auto;
     }
 
     EmailCardView Label {
@@ -35,24 +37,32 @@ class EmailCardView(ModalScreen):
         padding: 0 1;
     }
 
-    EmailCardView Select {
-        width: 30;
+    #header {
+        border-bottom: solid $primary;
+        padding-bottom: 1;
     }
 
     #body {
         height: 1fr;
-        min-height: 10;
         border: solid $primary;
+        margin: 1 0;
         padding: 1;
         overflow-y: auto;
+    }
+
+    #footer {
+        border-top: solid $primary;
+        padding-top: 1;
+        height: auto;
     }
     """
 
     BINDINGS = [
         ("escape", "dismiss", "Close"),
         ("space", "toggle_accept", "Accept/Reject"),
-        ("e", "edit_destination", "Edit"),
         ("r", "toggle_read", "Toggle Read"),
+        ("j", "next_email", "Next Email"),
+        ("k", "prev_email", "Previous Email"),
     ]
 
     STATUS_INDICATORS = {
@@ -72,90 +82,81 @@ class EmailCardView(ModalScreen):
     def compose(self):
         """Create child widgets."""
         with Vertical(id="dialog"):
-            with Horizontal():
-                yield Label("Subject:")
-                yield Static(self.action.email.subject, id="subject")
+            # Header section with metadata
+            with Vertical(id="header"):
+                with Horizontal():
+                    yield Label("Subject:")
+                    yield Static(self.action.email.subject, id="subject")
+                
+                with Horizontal():
+                    yield Label("From:")
+                    yield Static(self.action.email.sender, id="sender")
+                
+                with Horizontal():
+                    yield Label("Time:")
+                    yield Static(
+                        self.action.email.timestamp.strftime("%Y-%m-%d %H:%M") 
+                        if hasattr(self.action.email, 'timestamp') else "N/A", 
+                        id="time"
+                    )
+                
+                with Horizontal():
+                    yield Label("Status:")
+                    yield Static(
+                        f"{self.STATUS_INDICATORS[self.action.status]} {self.action.status.name}",
+                        id="status"
+                    )
+                
+                with Horizontal():
+                    yield Label("Destination:")
+                    yield Static(self.action.destination.name, id="destination")
+                
+                with Horizontal():
+                    yield Label("Read:")
+                    yield Static("Yes" if self.action.mark_as_read else "No", id="mark_read")
             
-            with Horizontal():
-                yield Label("From:")
-                yield Static(self.action.email.sender, id="sender")
-            
-            with Horizontal():
-                yield Label("Time:")
-                yield Static(
-                    self.action.email.timestamp.strftime("%Y-%m-%d %H:%M") 
-                    if hasattr(self.action.email, 'timestamp') else "N/A", 
-                    id="time"
-                )
-            
-            with Horizontal():
-                yield Label("Status:")
-                yield Static(
-                    f"{self.STATUS_INDICATORS[self.action.status]} {self.action.status.name}",
-                    id="status"
-                )
-            
-            with Horizontal():
-                yield Label("Destination:")
-                yield Select(
-                    [(dest.name, dest) for dest in EmailDestination],
-                    value=self.action.destination.name,
-                    id="destination"
-                )
-            
-            with Horizontal():
-                yield Label("Mark as Read:")
-                yield Select(
-                    [("Yes", True), ("No", False)],
-                    value=str(self.action.mark_as_read),
-                    id="mark_read"
-                )
-            
+            # Body section with email content
             yield Static(
-                self.action.email.body,
+                "(Placeholder) Email content will be displayed here",
                 id="body"
             )
+            
+            # Footer with shortcuts
+            with Vertical(id="footer"):
+                yield ShortcutBar()
 
-    def on_select_changed(self, event: Select.Changed) -> None:
-        """Handle changes to select widgets."""
+    def _modify_action(self, **kwargs) -> None:
+        """Modify the action and update the view."""
         if not self.action.can_modify:
             return
 
-        if event.select.id == "destination":
-            self._controller.modify_action(
-                self.action,
-                destination=EmailDestination[event.value]
-            )
-            self.query_one("#status").update(
-                f"{self.STATUS_INDICATORS[self.action.status]} {self.action.status.name}"
-            )
-        elif event.select.id == "mark_read":
-            self._controller.modify_action(
-                self.action,
-                mark_as_read=(event.value == "True")
-            )
-            self.query_one("#status").update(
-                f"{self.STATUS_INDICATORS[self.action.status]} {self.action.status.name}"
-            )
+        self._controller.modify_action(self.action, **kwargs)
+        self._update_status()
+
+    def _update_status(self) -> None:
+        """Update status displays."""
+        self.query_one("#status").update(
+            f"{self.STATUS_INDICATORS[self.action.status]} {self.action.status.name}"
+        )
+        self.query_one("#mark_read").update(
+            "Yes" if self.action.mark_as_read else "No"
+        )
 
     def action_toggle_accept(self) -> None:
         """Toggle between accepting and rejecting the action."""
-        if not self.action.can_modify:
-            return
-
         new_status = ActionStatus.ACCEPTED if self.action.status != ActionStatus.ACCEPTED else ActionStatus.REJECTED
-        self._controller.modify_action(self.action, status=new_status)
-        self.query_one("#status").update(
-            f"{self.STATUS_INDICATORS[self.action.status]} {self.action.status.name}"
-        )
+        self._modify_action(status=new_status)
 
     def action_toggle_read(self) -> None:
         """Toggle read status of the action."""
-        if not self.action.can_modify:
-            return
+        self._modify_action(mark_as_read=not self.action.mark_as_read)
 
-        self._controller.modify_action(self.action, mark_as_read=not self.action.mark_as_read)
-        self.query_one("#mark_read").value = str(self.action.mark_as_read)
-        self.query_one("#status").update(
-            f"{self.STATUS_INDICATORS[self.action.status]} {self.action.status.name}"
-        )
+    def action_next_email(self) -> None:
+        """Navigate to next email."""
+        # TODO: Implement navigation between emails
+        pass
+
+    def action_prev_email(self) -> None:
+        """Navigate to previous email."""
+        # TODO: Implement navigation between emails
+        pass

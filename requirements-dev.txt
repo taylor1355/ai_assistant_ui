@@ -1,4 +1,5 @@
 -r requirements.txt
+textual-dev
 pytest>=7.4.0
 pytest-cov>=4.1.0
 pytest-asyncio
